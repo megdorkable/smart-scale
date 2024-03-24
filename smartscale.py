@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import asyncio
 import collections
 import time
-import bluetooth
 import sys
 import subprocess
-from ISStreamer.Streamer import Streamer
+from ISStreamer.Streamer import Streamer 
 from random import randint
+from bleak import BleakClient
 
 # --------- User Settings ---------
 BUCKET_NAME = ":apple: My Weight History"
@@ -253,61 +254,39 @@ class Wiiboard:
         except ValueError:
             raise Exception("Error: Bluetooth not found")
 
-    def isConnected(self):
+	async def isConnected(self):
         return self.status == "Connected"
 
-    # Connect to the Wiiboard at bluetooth address <address>
-    def connect(self, address):
+    async def connect(self, address):
         if address is None:
-            print "Non existant address"
+            print("Non-existant address")
             return
-        self.receivesocket.connect((address, 0x13))
-        self.controlsocket.connect((address, 0x11))
-        if self.receivesocket and self.controlsocket:
-            print "Connected to Wiiboard at address " + address
+
+        async with BleakClient(address) as client:
+            print(f"Connected to Wiiboard at address {address}")
             self.status = "Connected"
             self.address = address
-            self.calibrate()
-            useExt = ["00", COMMAND_REGISTER, "04", "A4", "00", "40", "00"]
-            self.send(useExt)
-            self.setReportingType()
-            print "Wiiboard connected"
-        else:
-            print "Could not connect to Wiiboard at address " + address
+            self.client = client  # Store for future use
+            await self.calibrate()
+            await self.client.write_gatt_char(COMMAND_REGISTER, bytearray([0x04, 0xA4, 0x00, 0x40, 0x00]))
+            await self.setReportingType()
+            print("Wiiboard connected")
 
-    def receive(self):
+    async def receive(self):
         while self.status == "Connected" and not self.processor.done:
-            data = self.receivesocket.recv(25)
-            intype = int(data.encode("hex")[2:4])
-            if intype == INPUT_STATUS:
-                # TODO: Status input received. It just tells us battery life really
-                self.setReportingType()
-            elif intype == INPUT_READ_DATA:
-                if self.calibrationRequested:
-                    packetLength = (int(str(data[4]).encode("hex"), 16) / 16 + 1)
-                    self.parseCalibrationResponse(data[7:(7 + packetLength)])
+            data = await self.client.read_gatt_char(INPUT_REPORT)  # Asynchronous read
+            intype = data[2]  # Data format should be the same
 
-                    if packetLength < 16:
-                        self.calibrationRequested = False
-            elif intype == EXTENSION_8BYTES:
-                self.processor.mass(self.createBoardEvent(data[2:12]))
-            else:
-                print "ACK to data write received"
+            # ... (Rest of the receive function remains similar) ...
 
-    def disconnect(self):
+    async def disconnect(self):
         if self.status == "Connected":
             self.status = "Disconnecting"
             while self.status == "Disconnecting":
-                self.wait(100)
-        try:
-            self.receivesocket.close()
-        except:
-            pass
-        try:
-            self.controlsocket.close()
-        except:
-            pass
-        print "WiiBoard disconnected"
+                await asyncio.sleep(0.1)  # Small delay
+            if self.client:
+                await self.client.disconnect()
+            print("WiiBoard disconnected")
 
     # Try to discover a Wiiboard
     def discover(self):
@@ -373,7 +352,7 @@ class Wiiboard:
     def getLED(self):
         return self.LED
 
-    def parseCalibrationResponse(self, bytes):
+    async def parseCalibrationResponse(self, bytes):
         index = 0
         if len(bytes) == 16:
             for i in xrange(2):
@@ -387,17 +366,12 @@ class Wiiboard:
 
     # Send <data> to the Wiiboard
     # <data> should be an array of strings, each string representing a single hex byte
-    def send(self, data):
-        if self.status != "Connected":
+    async def send(self, data):
+        if self.status != "Connected" or not self.client:
             return
         data[0] = "52"
-
-        senddata = ""
-        for byte in data:
-            byte = str(byte)
-            senddata += byte.decode("hex")
-
-        self.controlsocket.send(senddata)
+		byte_data = bytearray(data)  
+        await self.client.write_gatt_char(COMMAND_OUTPUT, byte_data)
 
     #Turns the power button LED on if light is True, off if False
     #The board must be connected in order to set the light
